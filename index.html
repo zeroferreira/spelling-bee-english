@@ -253,11 +253,11 @@
       if (isMobile) {
         // Configuraciones específicas para móviles
         return {
-          continuous: false, // Mejor para móviles
+          continuous: true, // ¡Cambiado a true! Para intentar mantener el micrófono abierto
           interimResults: true,
           maxAlternatives: 3, // Reducir para mejor rendimiento
           timeouts: {
-            restart: 6000, // Aumentado de 2000 a 4000 milisegundos (4 segundos)
+            restart: 1000, // Reducimos el tiempo de reinicio, ya que ahora es continuo
             retry: 3000,
             error: 1500
           }
