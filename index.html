@@ -6,7 +6,7 @@
   <!-- Permisos para dispositivos móviles -->
   <meta name="permissions" content="microphone">
   <meta name="mobile-web-app-capable" content="yes">
-  <title>Spelling Bee Game</title>
+  <title>Spelling Bee 🐝</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
@@ -194,6 +194,8 @@
     const [usedWords, setUsedWords] = useState([]);
     const [isSpinning, setIsSpinning] = useState(false);
     const [animationStep, setAnimationStep] = useState(0);
+    const [showSuccessModal, setShowSuccessModal] = useState(false);
+    const [showErrorModal, setShowErrorModal] = useState(false);
     const [showDefinition, setShowDefinition] = useState(false);
     const [showExample, setShowExample] = useState(false);
     const [currentExample, setCurrentExample] = useState('');
@@ -382,65 +384,61 @@
       // Variables para control de duplicación
       let processedContent = new Set();
       let lastFinalTranscript = '';
+      let lastInterimResult = ''; // Para gestionar el texto provisional
       
       recognitionInstance.onresult = (event) => {
-        console.log('📝 Resultado recibido:', event.results);
-        
         let interimTranscript = '';
         let finalTranscript = '';
-        
-        // Procesar todos los resultados
+
         for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript;
-          
           if (event.results[i].isFinal) {
-            finalTranscript += transcript;
+            finalTranscript += event.results[i][0].transcript;
           } else {
-            interimTranscript += transcript;
+            interimTranscript += event.results[i][0].transcript;
           }
         }
-        
-        // Procesar resultados intermedios
-        if (interimTranscript) {
-          const currentText = interimTranscript.toLowerCase().trim();
-          console.log('🔄 Texto intermedio:', currentText);
-          
-          if (currentText.length > lastProcessedLength) {
-            const newPortion = currentText.substring(lastProcessedLength);
-            const result = processSpokenInput(newPortion);
-            
-            if (result === 'DELETE') {
-              setSpokenText(prev => prev.slice(0, -1));
-              console.log('🗑️ Eliminando última letra');
-            } else if (result === 'CLEAR') {
-              setSpokenText('');
-              console.log('🧹 Limpiando texto');
-            } else if (result) {
-              setSpokenText(prev => prev + result);
-              console.log('🔤 Letras agregadas:', result);
-            }
-            lastProcessedLength = currentText.length;
-          }
-        }
-        
-        // Procesar resultados finales
+
+        // Si hay un resultado final, lo procesamos y lo añadimos al texto estable
         if (finalTranscript) {
-          const currentText = finalTranscript.toLowerCase().trim();
-          console.log('✅ Texto final:', currentText);
-          
-          if (currentText.length > lastProcessedLength) {
-            const newPortion = currentText.substring(lastProcessedLength);
-            const result = processSpokenInput(newPortion);
+          const result = processSpokenInput(finalTranscript.toLowerCase().trim());
+          setSpokenText(prev => {
+            const base = prev.endsWith(lastInterimResult) 
+                ? prev.substring(0, prev.length - lastInterimResult.length) 
+                : prev;
             
+            let newText = base;
             if (result === 'DELETE') {
-              setSpokenText(prev => prev.slice(0, -1));
+              newText = newText.slice(0, -1);
             } else if (result === 'CLEAR') {
-              setSpokenText('');
+              newText = '';
             } else if (result) {
-              setSpokenText(prev => prev + result);
+              newText += result;
             }
-          }
-          lastProcessedLength = 0;
+            lastInterimResult = ''; // Limpiamos el provisional
+
+            // Solo detener si la palabra está completa y correcta
+            if (currentWord && newText.toLowerCase() === currentWord.word.toLowerCase()) {
+              setShowSuccessModal(true);
+              if (recognitionInstance) {
+                recognitionInstance.manualStop();
+              }
+            } else if (event.results[event.results.length - 1].isFinal && currentWord && newText.toLowerCase() !== currentWord.word.toLowerCase()) {
+              setShowErrorModal(true);
+            }
+            return newText;
+          });
+        } 
+        // Si solo hay resultado provisional, lo mostramos en tiempo real
+        else if (interimTranscript) {
+          const result = processSpokenInput(interimTranscript.toLowerCase().trim());
+          setSpokenText(prev => {
+            const base = prev.endsWith(lastInterimResult) 
+                ? prev.substring(0, prev.length - lastInterimResult.length) 
+                : prev;
+            
+            lastInterimResult = result; // Guardamos el nuevo provisional
+            return base + result;
+          });
         }
       };
       
@@ -1338,18 +1336,14 @@
       const checkSpelling = () => {
         if (currentWord && spokenText.toLowerCase() === currentWord.word.toLowerCase()) {
           setIsCorrect(true);
+          setShowSuccessModal(true);
           // Detener reconocimiento de voz si está activo
           if (isListening && recognition) {
             recognition.manualStop();
           }
-          setTimeout(() => {
-            setIsCorrect(null);
-            setSpokenText('');
-            selectRandomWord();
-          }, 2000);
         } else {
           setIsCorrect(false);
-          setTimeout(() => setIsCorrect(null), 2000);
+          setShowErrorModal(true);
         }
       };
 
@@ -5035,7 +5029,7 @@
         const numberInterval = setInterval(() => {
           setAnimationStep(numbers[currentIndex]);
           currentIndex = (currentIndex + 1) % numbers.length;
-        }, 100);
+        }, 50);
         
         setTimeout(() => {
           clearInterval(numberInterval);
@@ -5045,7 +5039,7 @@
           setIsSpinning(false);
           setAnimationStep(0);
           setShowDefinition(false);
-        }, 2000);
+        }, 1000);
       };
 
       const resetGame = () => {
@@ -5055,6 +5049,47 @@
         setShowDefinition(false);
         setShowExample(false);
         setSpokenText(''); // Limpiar el texto deletreado
+      };
+
+      const SuccessModal = () => {
+        const handleClose = () => {
+          setShowSuccessModal(false);
+          selectRandomWord();
+        };
+
+        return React.createElement('div', {
+          className: 'fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4',
+          style: { animation: 'modalGrow 0.5s ease-out' }
+        }, React.createElement('div', { 
+          className: 'bg-gradient-to-br from-green-400 to-green-600 text-white p-6 sm:p-8 rounded-2xl shadow-2xl text-center transform scale-100 w-full max-w-sm sm:max-w-md' 
+        },
+          React.createElement('h2', { className: 'text-3xl sm:text-5xl font-bold mb-3 sm:mb-4' }, 'Correct!'),
+          React.createElement('button', {
+            onClick: handleClose,
+            className: 'bg-white text-green-500 font-bold py-2 sm:py-3 px-6 sm:px-8 rounded-full text-base sm:text-lg transition-transform transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-green-300 w-full sm:w-auto'
+          }, 'Next Word')
+        ));
+      };
+
+      const ErrorModal = () => {
+        const handleClose = () => {
+          setShowErrorModal(false);
+          setSpokenText(''); // Clear the text to allow a new attempt
+        };
+
+        return React.createElement('div', {
+          className: 'fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4',
+          style: { animation: 'modalGrow 0.5s ease-out' }
+        }, React.createElement('div', { 
+          className: 'bg-gradient-to-br from-red-400 to-red-600 text-white p-6 sm:p-8 rounded-2xl shadow-2xl text-center transform scale-100 w-full max-w-sm sm:max-w-md' 
+        },
+          React.createElement('h2', { className: 'text-3xl sm:text-5xl font-bold mb-3 sm:mb-4' }, 'Incorrect!'),
+          React.createElement('p', { className: 'text-base sm:text-xl mb-4 sm:mb-6' }, `Try spelling: ${currentWord.word}`),
+          React.createElement('button', {
+            onClick: handleClose,
+            className: 'bg-white text-red-500 font-bold py-2 sm:py-3 px-6 sm:px-8 rounded-full text-base sm:text-lg transition-transform transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-red-300 w-full sm:w-auto'
+          }, 'Next Word')
+        ));
       };
 
       const HomeScreen = () => React.createElement('div', { className: 'min-h-screen bg-gradient-to-br from-yellow-400 via-yellow-300 to-amber-400 flex items-center justify-center p-4 sm:p-8' },
@@ -6493,7 +6528,9 @@
         currentScreen === 'menu' && React.createElement(MenuScreen),
         currentScreen === 'game' && React.createElement(GameScreen),
         currentScreen === 'instructions' && React.createElement(InstructionsScreen),
-        currentScreen === 'winners' && React.createElement(WinnersScreen)
+        currentScreen === 'winners' && React.createElement(WinnersScreen),
+        showSuccessModal && React.createElement(SuccessModal, {}),
+        showErrorModal && React.createElement(ErrorModal, {})
       );
     };
 
