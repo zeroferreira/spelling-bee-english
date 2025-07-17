@@ -210,6 +210,18 @@
     const [recognitionReady, setRecognitionReady] = useState(false);
     const [shouldKeepListening, setShouldKeepListening] = useState(false);
     const [permissionsRequested, setPermissionsRequested] = useState(false);
+    const [recognitionConfidence, setRecognitionConfidence] = useState(0);
+    const [lastRecognizedText, setLastRecognizedText] = useState('');
+    const [filterSensitivity, setFilterSensitivity] = useState('medium');
+
+    const getFilterThreshold = () => {
+      switch(filterSensitivity) {
+        case 'low': return 0.5;    // Más permisivo
+        case 'medium': return 0.7; // Balanceado
+        case 'high': return 0.9;   // Más estricto
+        default: return 0.7;
+      }
+    };
 
 
     
@@ -233,6 +245,36 @@
     }, []);
 
 
+
+    // Configuración optimizada para móviles
+    const optimizeForMobile = () => {
+      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      
+      if (isMobile) {
+        // Configuraciones específicas para móviles
+        return {
+          continuous: false, // Mejor para móviles
+          interimResults: true,
+          maxAlternatives: 3, // Reducir para mejor rendimiento
+          timeouts: {
+            restart: 2000,
+            retry: 3000,
+            error: 1500
+          }
+        };
+      }
+      
+      return {
+        continuous: true,
+        interimResults: true,
+        maxAlternatives: 5,
+        timeouts: {
+          restart: 300,
+          retry: 1000,
+          error: 500
+        }
+      };
+    };
 
     // Función de reconocimiento con procesamiento inmediato
     const initSpeechRecognition = () => {
@@ -259,36 +301,75 @@
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       const recognitionInstance = new SpeechRecognition();
       
-      // Configuración optimizada para móviles
-      recognitionInstance.continuous = true;
-      recognitionInstance.interimResults = true; // CLAVE: Permite resultados intermedios
-      recognitionInstance.lang = 'en-US';
-      recognitionInstance.maxAlternatives = 1;
-      
-      // Configuraciones específicas para móviles
+      // Obtener configuración optimizada
+      const config = optimizeForMobile();
       const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+      
+      // Aplicar configuración base
+      recognitionInstance.continuous = config.continuous;
+      recognitionInstance.interimResults = config.interimResults;
+      recognitionInstance.lang = 'en-US';
+      recognitionInstance.maxAlternatives = config.maxAlternatives;
+      
+      // Configuraciones específicas por dispositivo
       if (isMobile) {
-        // En móviles, usar configuración más conservadora
-        recognitionInstance.continuous = false; // Cambiar a false para móviles
-        recognitionInstance.interimResults = false; // Simplificar para móviles
+        // Configuraciones adicionales para iOS
+        if (isIOS) {
+          recognitionInstance.maxAlternatives = 1; // iOS funciona mejor con 1
+        }
         
-        // Configuraciones adicionales para móviles
+        // Configurar gramática si está disponible
         try {
-          recognitionInstance.grammars = new (window.SpeechGrammarList || window.webkitSpeechGrammarList)();
+          const grammarList = new (window.SpeechGrammarList || window.webkitSpeechGrammarList)();
+          const alphabet = 'a b c d e f g h i j k l m n o p q r s t u v w x y z alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu delete clear backspace reset';
+          const grammar = '#JSGF V1.0; grammar letters; public <letter> = ' + alphabet + ';';
+          grammarList.addFromString(grammar, 1);
+          recognitionInstance.grammars = grammarList;
         } catch (e) {
-          console.log('SpeechGrammarList no disponible');
+          console.log('SpeechGrammarList no disponible:', e);
         }
       }
       
-      // Intentar configuración offline (no garantizada pero ayuda)
+      // Configuraciones avanzadas de calidad
       try {
-        recognitionInstance.serviceURI = '';
+        // Intentar configuraciones de calidad de audio
+        recognitionInstance.audioTrack = true;
+        recognitionInstance.serviceURI = ''; // Forzar procesamiento local cuando sea posible
       } catch (e) {
-        // Ignorar si no es compatible
+        console.log('Configuraciones avanzadas no disponibles:', e);
       }
       
       let isManualStop = false;
       let lastProcessedLength = 0; // Para evitar procesar el mismo texto múltiples veces
+      let noiseFilter = []; // Buffer para filtrar ruido
+      let contextBuffer = ''; // Buffer de contexto para mejor precisión
+      let confidenceThreshold = 0.3; // Umbral de confianza mínimo
+      let detectedNoiseLevel = 0; // Nivel de ruido detectado
+      
+      // Umbral de confianza optimizado para inglés
+      const getEnglishOptimizedThreshold = (context, noiseLevel, letterType) => {
+        let baseThreshold = 0.65; // Más estricto por defecto
+        
+        // Ajustes específicos para tipos de letras
+        const confusingLetters = ['b', 'd', 'p', 't', 'c', 's', 'f', 'v'];
+        if (confusingLetters.includes(letterType)) {
+          baseThreshold += 0.1; // Más estricto para letras confusas
+        }
+        
+        // Ajustar según contexto de deletreo
+        if (context && context.length > 2) {
+          baseThreshold -= 0.05; // Ligeramente más tolerante con contexto
+        }
+        
+        // Ajustar según nivel de ruido
+        if (noiseLevel > 0.6) {
+          baseThreshold += 0.15; // Mucho más estricto con ruido
+        }
+        
+        // Límites seguros
+        return Math.max(0.5, Math.min(0.85, baseThreshold));
+      };
       
       recognitionInstance.onstart = () => {
         console.log('🎤 Reconocimiento INICIADO');
@@ -297,6 +378,10 @@
         isManualStop = false;
         lastProcessedLength = 0;
       };
+      
+      // Variables para control de duplicación
+      let processedContent = new Set();
+      let lastFinalTranscript = '';
       
       recognitionInstance.onresult = (event) => {
         console.log('📝 Resultado recibido:', event.results);
@@ -362,20 +447,20 @@
       recognitionInstance.onerror = (event) => {
         console.error('❌ Error de reconocimiento:', event.error);
         
+        const timeouts = optimizeForMobile().timeouts;
+        
         switch(event.error) {
           case 'network':
             console.log('🌐 Error de red - usando modo offline');
             // En lugar de fallar, continuar sin conexión
             if (shouldKeepListening && !isManualStop) {
-              const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-              const retryDelay = isMobile ? 2000 : 1000; // Delay más largo para móviles
               setTimeout(() => {
                 try {
                   recognitionInstance.start();
                 } catch (error) {
                   console.log('Error al reiniciar después de error de red:', error);
                 }
-              }, retryDelay);
+              }, timeouts.retry);
             }
             break;
             
@@ -415,7 +500,7 @@
                 } catch (error) {
                   console.log('Error al reiniciar después de abort:', error);
                 }
-              }, 500);
+              }, timeouts.error);
             }
             break;
             
@@ -428,7 +513,7 @@
                 } catch (error) {
                   console.log('Error al reiniciar después de error desconocido:', error);
                 }
-              }, 1500);
+              }, timeouts.error);
             }
         }
       };
@@ -436,10 +521,15 @@
       recognitionInstance.onend = () => {
         console.log('🔚 Reconocimiento terminado');
         
+        // Limpiar variables de deduplicación al reiniciar
+        processedContent.clear();
+        lastFinalTranscript = '';
+        
         if (shouldKeepListening && !isManualStop) {
           console.log('🔄 Reiniciando automáticamente...');
+          const timeouts = optimizeForMobile().timeouts;
           const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-          const restartDelay = isMobile ? 1000 : 300; // Delay más largo para móviles
+          
           setTimeout(() => {
             try {
               recognitionInstance.start();
@@ -456,10 +546,10 @@
                     setIsListening(false);
                     setShouldKeepListening(false);
                   }
-                }, 2000);
+                }, timeouts.retry);
               }
             }
-          }, restartDelay);
+          }, timeouts.restart);
         } else {
           setIsListening(false);
           setRecognitionReady(false);
@@ -471,6 +561,10 @@
       recognitionInstance.manualStop = () => {
         isManualStop = true;
         setShouldKeepListening(false);
+        setIsListening(false); // ← Esta línea faltaba
+        setRecognitionReady(false); // ← Agregar esta línea también
+        setRecognitionConfidence(0); // Limpiar indicador de confianza
+        setLastRecognizedText(''); // Limpiar último texto reconocido
         lastProcessedLength = 0;
         try {
           recognitionInstance.stop();
@@ -560,17 +654,18 @@
             setRecognition(newRecognition);
             setShouldKeepListening(true);
             
-            // Iniciar con delay apropiado para móviles
-            const startDelay = isMobile ? 500 : 100;
-            setTimeout(() => {
-              try {
-                newRecognition.start();
-                console.log('✅ Reconocimiento iniciado');
-              } catch (error) {
-                console.error('Error en inicio:', error);
-                alert('Error al iniciar reconocimiento. Intenta de nuevo.');
-              }
-            }, startDelay);
+            // Iniciar con delay optimizado
+          const config = optimizeForMobile();
+          const startDelay = config.timeouts.error;
+          setTimeout(() => {
+            try {
+              newRecognition.start();
+              console.log('✅ Reconocimiento iniciado');
+            } catch (error) {
+              console.error('Error en inicio:', error);
+              alert('Error al iniciar reconocimiento. Intenta de nuevo.');
+            }
+          }, startDelay);
           }
           return;
         } catch (error) {
@@ -596,9 +691,10 @@
           if (error.name === 'InvalidStateError') {
             try {
               recognition.stop();
+              const timeouts = optimizeForMobile().timeouts;
               setTimeout(() => {
                 recognition.start();
-              }, 500);
+              }, timeouts.error);
             } catch (e) {
               console.error('Error en reinicio forzado:', e);
             }
@@ -636,61 +732,607 @@
       return matrix[str2.length][str1.length];
     };
 
-    // Función simplificada SOLO para deletreo
-    const processSpokenInput = (transcript) => {
-      console.log('🔤 Procesando deletreo:', transcript);
+    // Función para validar contexto de deletreo
+    const validateSpellingContext = (input, context) => {
+      // Lista de palabras comunes que NO son letras del alfabeto
+      const nonLetterWords = [
+        'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+        'from', 'up', 'about', 'into', 'through', 'during', 'before', 'after',
+        'above', 'below', 'between', 'among', 'under', 'over', 'inside', 'outside',
+        'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+        'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might',
+        'can', 'must', 'shall', 'this', 'that', 'these', 'those', 'a', 'an',
+        'some', 'any', 'many', 'much', 'few', 'little', 'all', 'both', 'each',
+        'every', 'either', 'neither', 'one', 'two', 'three', 'four', 'five',
+        'first', 'second', 'third', 'last', 'next', 'previous', 'other', 'another',
+        'same', 'different', 'new', 'old', 'good', 'bad', 'big', 'small', 'long',
+        'short', 'high', 'low', 'right', 'wrong', 'true', 'false', 'yes', 'no',
+        'please', 'thank', 'thanks', 'sorry', 'excuse', 'hello', 'hi', 'bye',
+        'goodbye', 'okay', 'ok', 'sure', 'maybe', 'perhaps', 'probably', 'definitely'
+      ];
       
-      // Mapeo mejorado de letras
-      const letterMap = {
+      // Palabras que indican comandos de deletreo válidos
+      const validSpellingWords = [
+        'letter', 'spell', 'spelling', 'alphabet', 'character', 'capital', 'lowercase',
+        'uppercase', 'phonetic', 'nato', 'alpha', 'bravo', 'charlie', 'delta', 'echo',
+        'foxtrot', 'golf', 'hotel', 'india', 'juliet', 'kilo', 'lima', 'mike',
+        'november', 'oscar', 'papa', 'quebec', 'romeo', 'sierra', 'tango',
+        'uniform', 'victor', 'whiskey', 'xray', 'yankee', 'zulu'
+      ];
+      
+      const words = input.toLowerCase().split(/\s+/);
+      
+      // Si contiene palabras claramente no relacionadas con deletreo
+      const hasNonLetterWords = words.some(word => 
+        nonLetterWords.includes(word) && word.length > 2
+      );
+      
+      if (hasNonLetterWords) {
+        console.log('🚫 Detectadas palabras no relacionadas con deletreo:', words);
+        return false;
+      }
+      
+      // Si contiene palabras válidas de deletreo
+      const hasValidWords = words.some(word => 
+        validSpellingWords.includes(word) || 
+        /^[a-z]$/.test(word) || // Letras individuales
+        /^(ay|bee|see|dee|ee|eff|gee|aitch|eye|jay|kay|el|em|en|oh|pee|cue|are|ess|tea|you|vee|double|ex|why|zee|zed)$/.test(word)
+      );
+      
+      if (hasValidWords) {
+        console.log('✅ Contexto válido de deletreo detectado');
+        return true;
+      }
+      
+      // Si el contexto actual sugiere que estamos deletreando
+      if (context && context.length > 0) {
+        console.log('✅ Continuando deletreo basado en contexto');
+        return true;
+      }
+      
+      // Por defecto, permitir si no hay evidencia clara de que no es deletreo
+      return words.length <= 3; // Permitir frases cortas
+    };
+
+    // Sistema avanzado de filtrado de ruido
+    const advancedNoiseFilter = (text, confidence) => {
+      const noisePatterns = [
+        /^(um|uh|ah|er|hmm|mm|hm|eh|oh|erm)$/i,
+        /^(like|you know|basically|actually|literally)$/i,
+        /^(and|the|a|an|is|are|was|were)$/i, // Palabras comunes no relevantes
+        /^[^a-z]*$/i, // Solo símbolos o números
+        /^.{1,2}$/i && confidence < 0.5 // Palabras muy cortas con baja confianza
+      ];
+      
+      const isNoise = noisePatterns.some(pattern => pattern.test(text));
+      
+      // Detectar repeticiones excesivas
+      const words = text.split(' ');
+      const uniqueWords = new Set(words);
+      const repetitionRatio = words.length / uniqueWords.size;
+      
+      if (repetitionRatio > 2) {
+        console.log('🔇 Repetición excesiva detectada:', text);
+        return true;
+      }
+      
+      return isNoise;
+    };
+
+    // Sistema de discriminación fonética avanzado
+    const phoneticDiscriminator = (input, confidence) => {
+      const confusionPairs = {
+        // B vs D - Principal problema identificado
+        'b': { similar: ['d', 'p', 'v'], phonetic: ['bee', 'be', 'beta'] },
+        'd': { similar: ['b', 't', 'g'], phonetic: ['dee', 'de', 'delta'] },
+        
+        // Otras confusiones comunes en inglés
+        'p': { similar: ['b', 't', 'v'], phonetic: ['pee', 'pe', 'papa'] },
+        't': { similar: ['d', 'p', 'c'], phonetic: ['tea', 'tee', 'tango'] },
+        'c': { similar: ['s', 'k', 'g'], phonetic: ['see', 'sea', 'charlie'] },
+        's': { similar: ['c', 'z', 'f'], phonetic: ['ess', 'es', 'sierra'] },
+        'f': { similar: ['s', 'v', 'th'], phonetic: ['eff', 'ef', 'foxtrot'] },
+        'v': { similar: ['f', 'b', 'w'], phonetic: ['vee', 've', 'victor'] },
+        'g': { similar: ['j', 'k', 'd'], phonetic: ['gee', 'ge', 'golf'] },
+        'j': { similar: ['g', 'ch', 'y'], phonetic: ['jay', 'jaye', 'juliet'] },
+        'm': { similar: ['n', 'w'], phonetic: ['em', 'mike'] },
+        'n': { similar: ['m', 'ng'], phonetic: ['en', 'november'] }
+      };
+      
+      const inputLower = input.toLowerCase();
+      
+      // Buscar coincidencias fonéticas específicas
+      for (const [letter, data] of Object.entries(confusionPairs)) {
+        if (data.phonetic.includes(inputLower)) {
+          // Aumentar confianza si usa pronunciación fonética específica
+          return { letter, confidence: Math.min(1.0, confidence + 0.2) };
+        }
+      }
+      
+      // Si es una letra directa, verificar contexto
+      if (inputLower.length === 1 && /[a-z]/.test(inputLower)) {
+        const letterData = confusionPairs[inputLower];
+        if (letterData && confidence < 0.7) {
+          // Reducir confianza para letras ambiguas con baja confianza
+          return { letter: inputLower, confidence: confidence * 0.8 };
+        }
+      }
+      
+      return { letter: inputLower, confidence };
+    };
+
+    // Sistema de auto-corrección
+    const intelligentAutoCorrect = (input, context) => {
+      const commonMistakes = {
+        'see': 'c', 'sea': 'c', 'si': 'c',
+        'kay': 'k', 'kaye': 'k',
+        'you': 'u', 'yu': 'u',
+        'why': 'y', 'wye': 'y',
+        'are': 'r', 'ar': 'r',
+        'tea': 't', 'tee': 't',
+        'pee': 'p', 'pe': 'p',
+        'bee': 'b', 'be': 'b',
+        'dee': 'd', 'de': 'd',
+        'gee': 'g', 'ge': 'g',
+        'jay': 'j', 'jaye': 'j',
+        'el': 'l', 'ell': 'l',
+        'em': 'm', 'me': 'm',
+        'en': 'n', 'ne': 'n',
+        'oh': 'o', 'owe': 'o',
+        'ess': 's', 'es': 's',
+        'vee': 'v', 've': 'v',
+        'double you': 'w', 'doubleyou': 'w',
+        'ex': 'x', 'eks': 'x',
+        'zee': 'z', 'zed': 'z'
+      };
+      
+      // Aplicar corrección si existe
+      const corrected = commonMistakes[input.toLowerCase()];
+      if (corrected) {
+        console.log(`🔧 Auto-corrección: "${input}" → "${corrected}"`);
+        return corrected;
+      }
+      
+      return input;
+    };
+
+    // Sistema de predicción basado en contexto
+    const contextualPredictor = (currentInput, wordToSpell, spokenSoFar) => {
+      const remaining = wordToSpell.substring(spokenSoFar.length);
+      const nextExpectedLetter = remaining[0]?.toLowerCase();
+      
+      // Si el input coincide con la siguiente letra esperada
+      if (currentInput === nextExpectedLetter) {
+        return { confidence: 1.0, suggestion: currentInput };
+      }
+      
+      // Buscar coincidencias fonéticas
+      const phoneticMatches = {
+        'c': ['see', 'sea', 'si'],
+        'k': ['kay', 'kaye', 'que'],
+        'q': ['cue', 'queue', 'kyu'],
+        'u': ['you', 'yu'],
+        'y': ['why', 'wye']
+      };
+      
+      if (phoneticMatches[nextExpectedLetter]?.includes(currentInput)) {
+        return { confidence: 0.9, suggestion: nextExpectedLetter };
+      }
+      
+      return { confidence: 0.5, suggestion: currentInput };
+    };
+
+    // Función mejorada para detectar comandos con tolerancia a errores
+      const detectVoiceCommand = (text) => {
+        const cleanText = text.toLowerCase().trim();
+        
+        // Comandos de borrado con variaciones
+        const deleteCommands = [
+          'delete', 'del', 'remove', 'erase', 'backspace', 'back',
+          'delete that', 'remove that', 'erase that', 'take that back',
+          'undo', 'undo that', 'scratch that', 'cancel that'
+        ];
+        
+        // Comandos de limpieza con variaciones
+        const clearCommands = [
+          'clear', 'clear all', 'reset', 'start over', 'new word',
+          'clear everything', 'delete all', 'remove all', 'erase all',
+          'restart', 'begin again', 'fresh start'
+        ];
+        
+        // Buscar coincidencias exactas primero
+        if (deleteCommands.some(cmd => cleanText.includes(cmd))) {
+          return 'DELETE';
+        }
+        
+        if (clearCommands.some(cmd => cleanText.includes(cmd))) {
+          return 'CLEAR';
+        }
+        
+        // Buscar coincidencias aproximadas usando distancia de edición
+        for (const cmd of deleteCommands) {
+          if (levenshteinDistance(cleanText, cmd) <= Math.max(1, Math.floor(cmd.length * 0.3))) {
+            console.log(`🎯 Comando DELETE detectado por similitud: "${cleanText}" ≈ "${cmd}"`);
+            return 'DELETE';
+          }
+        }
+        
+        for (const cmd of clearCommands) {
+          if (levenshteinDistance(cleanText, cmd) <= Math.max(1, Math.floor(cmd.length * 0.3))) {
+            console.log(`🎯 Comando CLEAR detectado por similitud: "${cleanText}" ≈ "${cmd}"`);
+            return 'CLEAR';
+          }
+        }
+        
+        return null;
+      };
+      
+      // Mapeo mejorado de letras con variaciones de pronunciación en inglés
+      const enhancedLetterMap = {
         // Letras básicas
         'a': 'a', 'b': 'b', 'c': 'c', 'd': 'd', 'e': 'e', 'f': 'f', 'g': 'g', 'h': 'h',
         'i': 'i', 'j': 'j', 'k': 'k', 'l': 'l', 'm': 'm', 'n': 'n', 'o': 'o', 'p': 'p',
         'q': 'q', 'r': 'r', 's': 's', 't': 't', 'u': 'u', 'v': 'v', 'w': 'w', 'x': 'x',
         'y': 'y', 'z': 'z',
         
-        // Pronunciaciones comunes
-        'ay': 'a', 'bee': 'b', 'see': 'c', 'sea': 'c', 'dee': 'd', 'ee': 'e',
-        'eff': 'f', 'gee': 'g', 'aitch': 'h', 'eye': 'i', 'jay': 'j', 'kay': 'k',
-        'el': 'l', 'em': 'm', 'en': 'n', 'oh': 'o', 'pee': 'p', 'cue': 'q',
-        'are': 'r', 'ess': 's', 'tea': 't', 'you': 'u', 'vee': 'v',
-        'double you': 'w', 'doubleyou': 'w', 'ex': 'x', 'why': 'y', 'zee': 'z', 'zed': 'z',
+        // Pronunciaciones comunes en inglés con mayor precisión
+        'ay': 'a', 'aye': 'a', 'eh': 'a', 'hey': 'a',
+        'bee': 'b', 'be': 'b', 'bea': 'b', 'bey': 'b',
+        'see': 'c', 'sea': 'c', 'cee': 'c', 'si': 'c',
+        'dee': 'd', 'de': 'd', 'day': 'd',
+        'ee': 'e', 'e': 'e', 'hey': 'e',
+        'eff': 'f', 'ef': 'f', 'ph': 'f', 'fee': 'f',
+        'gee': 'g', 'ge': 'g', 'jee': 'g', 'ghee': 'g',
+        'aitch': 'h', 'ache': 'h', 'haitch': 'h', 'h': 'h', 'hey': 'h',
+        'eye': 'i', 'aye': 'i', 'ai': 'i', 'high': 'i',
+        'jay': 'j', 'jaye': 'j', 'je': 'j', 'jey': 'j',
+        'kay': 'k', 'kaye': 'k', 'ke': 'k', 'key': 'k',
+        'el': 'l', 'ell': 'l', 'le': 'l', 'elle': 'l',
+        'em': 'm', 'me': 'm', 'mm': 'm',
+        'en': 'n', 'ne': 'n', 'nn': 'n',
+        'ou': 'o', 'oh': 'o', 'owe': 'o', 'o': 'o', 'eau': 'o', 'oo': 'o',
+        'pee': 'p', 'pe': 'p', 'pi': 'p', 'pea': 'p',
+        'cue': 'q', 'queue': 'q', 'que': 'q', 'kyu': 'q', 'cu': 'q',
+        'are': 'r', 'ar': 'r', 're': 'r', 'arr': 'r',
+        'ess': 's', 'es': 's', 'se': 's', 'ss': 's',
+        'tea': 't', 'tee': 't', 'te': 't', 'ti': 't', 'tay': 't',
+        'you': 'u', 'yu': 'u', 'ue': 'u', 'ooh': 'u',
+        'vee': 'v', 've': 'v', 'vi': 'v', 'vay': 'v',
+        'double you': 'w', 'doubleyou': 'w', 'double u': 'w', 'w': 'w', 'dub': 'w',
+        'ex': 'x', 'eks': 'x', 'x': 'x', 'ecks': 'x',
+        'why': 'y', 'wye': 'y', 'wi': 'y', 'way': 'y',
+        'zee': 'z', 'zed': 'z', 'ze': 'z', 'zay': 'z',
         
-        // Alfabeto fonético NATO
-        'alpha': 'a', 'bravo': 'b', 'charlie': 'c', 'delta': 'd', 'echo': 'e',
-        'foxtrot': 'f', 'golf': 'g', 'hotel': 'h', 'india': 'i', 'juliet': 'j',
-        'kilo': 'k', 'lima': 'l', 'mike': 'm', 'november': 'n', 'oscar': 'o',
-        'papa': 'p', 'quebec': 'q', 'romeo': 'r', 'sierra': 's', 'tango': 't',
-        'uniform': 'u', 'victor': 'v', 'whiskey': 'w', 'xray': 'x', 'x-ray': 'x',
-        'yankee': 'y', 'zulu': 'z',
+        // Alfabeto fonético NATO con variaciones
+        'alpha': 'a', 'alfa': 'a', 'alpa': 'a',
+        'bravo': 'b', 'brawo': 'b', 'brabo': 'b',
+        'charlie': 'c', 'charley': 'c', 'charly': 'c',
+        'delta': 'd', 'dalta': 'd',
+        'echo': 'e', 'eco': 'e', 'ecko': 'e',
+        'foxtrot': 'f', 'fox trot': 'f', 'foxtrat': 'f',
+        'golf': 'g', 'gulf': 'g', 'galf': 'g',
+        'hotel': 'h', 'hotle': 'h',
+        'india': 'i', 'indya': 'i',
+        'juliet': 'j', 'juliett': 'j', 'juliat': 'j',
+        'kilo': 'k', 'kelo': 'k',
+        'lima': 'l', 'lema': 'l', 'leema': 'l',
+        'mike': 'm', 'mic': 'm', 'myk': 'm',
+        'november': 'n', 'novamber': 'n',
+        'oscar': 'o', 'oskar': 'o',
+        'papa': 'p', 'pappa': 'p',
+        'quebec': 'q', 'kebec': 'q', 'quebek': 'q',
+        'romeo': 'r', 'romio': 'r',
+        'sierra': 's', 'sera': 's',
+        'tango': 't', 'tongo': 't',
+        'uniform': 'u', 'uneform': 'u',
+        'victor': 'v', 'viktor': 'v', 'victer': 'v',
+        'whiskey': 'w', 'whisky': 'w', 'wisky': 'w',
+        'xray': 'x', 'x-ray': 'x', 'x ray': 'x', 'exray': 'x',
+        'yankee': 'y', 'yankey': 'y', 'yanky': 'y',
+        'zulu': 'z', 'zulo': 'z',
         
-        // Comandos especiales
-        'delete': 'DELETE', 'backspace': 'DELETE', 'clear': 'CLEAR', 'reset': 'CLEAR'
+        // Comandos especiales con variaciones
+        'delete': 'DELETE', 'backspace': 'DELETE', 'back': 'DELETE', 'remove': 'DELETE', 'erase': 'DELETE',
+        'clear': 'CLEAR', 'reset': 'CLEAR', 'clean': 'CLEAR', 'start over': 'CLEAR', 'new': 'CLEAR'
       };
-      
-      const words = transcript.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/);
-      let letters = '';
-      
-      for (const word of words) {
-        const cleanWord = word.trim();
+
+      // Función mejorada para encontrar coincidencias en inglés
+      const findEnglishBestMatch = (word, threshold = 0.8) => {
+        const exactMatch = enhancedLetterMap[word];
+        if (exactMatch) return { letter: exactMatch, confidence: 1.0 };
         
-        if (letterMap[cleanWord]) {
-          if (cleanWord === 'delete' || cleanWord === 'backspace') {
-            return 'DELETE';
-          } else if (cleanWord === 'clear' || cleanWord === 'reset') {
-            return 'CLEAR';
-          } else {
-            letters += letterMap[cleanWord];
-            console.log('🔤 Letra detectada:', cleanWord, '->', letterMap[cleanWord]);
+        let bestMatch = null;
+        let bestScore = 0;
+        
+        // Priorizar coincidencias fonéticas
+        const phoneticPairs = {
+          'b': ['bee', 'be', 'bea', 'bravo'],
+          'd': ['dee', 'de', 'delta'],
+          'c': ['see', 'sea', 'cee', 'charlie'],
+          'p': ['pee', 'pe', 'papa'],
+          't': ['tea', 'tee', 'tango'],
+          'g': ['gee', 'ge', 'golf'],
+          'v': ['vee', 've', 'victor'],
+          'j': ['jay', 'jaye', 'juliet'],
+          'k': ['kay', 'kaye', 'kilo'],
+          'q': ['cue', 'queue', 'quebec'],
+          'r': ['are', 'ar', 'romeo'],
+          's': ['ess', 'es', 'sierra'],
+          'u': ['you', 'yu', 'uniform'],
+          'w': ['double you', 'doubleyou', 'whiskey'],
+          'x': ['ex', 'eks', 'xray'],
+          'y': ['why', 'wye', 'yankee'],
+          'z': ['zee', 'zed', 'zulu']
+        };
+        
+        // Buscar en pares fonéticos primero
+        for (const [letter, variations] of Object.entries(phoneticPairs)) {
+          for (const variation of variations) {
+            const distance = levenshteinDistance(word, variation);
+            const similarity = 1 - (distance / Math.max(word.length, variation.length));
+            
+            if (similarity >= threshold && similarity > bestScore) {
+              bestMatch = letter;
+              bestScore = similarity;
+            }
           }
-        } else if (cleanWord.length === 1 && /[a-z]/.test(cleanWord)) {
-          letters += cleanWord;
-          console.log('🔤 Letra directa:', cleanWord);
         }
-      }
-      
-      console.log('🔤 Letras extraídas:', letters);
-      return letters;
-    };
+        
+        // Si no se encuentra en fonéticos, buscar en todo el mapeo
+        if (!bestMatch) {
+          for (const [key, value] of Object.entries(enhancedLetterMap)) {
+            if (key.length > 1) {
+              const distance = levenshteinDistance(word, key);
+              const similarity = 1 - (distance / Math.max(word.length, key.length));
+              
+              if (similarity >= threshold && similarity > bestScore) {
+                bestMatch = value;
+                bestScore = similarity;
+              }
+            }
+          }
+        }
+        
+        return bestMatch ? { letter: bestMatch, confidence: bestScore } : null;
+      };
+
+      // Nueva función para detectar secuencias repetidas
+      const detectRepeatedSequences = (words) => {
+        const sequences = [];
+        
+        // Mapeo de pronunciaciones comunes para letras
+        const letterSounds = {
+          'ou': 'o', 'oh': 'o', 'owe': 'o', 'eau': 'o',
+          'ay': 'a', 'aye': 'a', 'eh': 'a',
+          'bee': 'b', 'be': 'b', 'bea': 'b',
+          'see': 'c', 'sea': 'c', 'cee': 'c', 'si': 'c',
+          'dee': 'd', 'de': 'd', 'day': 'd',
+          'ee': 'e', 'hey': 'e',
+          'eff': 'f', 'ef': 'f', 'fee': 'f',
+          'gee': 'g', 'ge': 'g', 'jee': 'g',
+          'aitch': 'h', 'ache': 'h', 'haitch': 'h',
+          'eye': 'i', 'aye': 'i', 'ai': 'i', 'high': 'i',
+          'jay': 'j', 'jaye': 'j', 'je': 'j',
+          'kay': 'k', 'kaye': 'k', 'ke': 'k', 'key': 'k',
+          'el': 'l', 'ell': 'l', 'le': 'l', 'elle': 'l',
+          'em': 'm', 'me': 'm', 'mm': 'm',
+          'en': 'n', 'ne': 'n', 'nn': 'n',
+          'pee': 'p', 'pe': 'p', 'pi': 'p', 'pea': 'p',
+          'cue': 'q', 'queue': 'q', 'que': 'q', 'kyu': 'q',
+          'are': 'r', 'ar': 'r', 're': 'r', 'arr': 'r',
+          'ess': 's', 'es': 's', 'se': 's', 'ss': 's',
+          'tea': 't', 'tee': 't', 'te': 't', 'ti': 't',
+          'you': 'u', 'yu': 'u', 'ue': 'u', 'ooh': 'u',
+          'vee': 'v', 've': 'v', 'vi': 'v',
+          'double': 'w', 'doubleyou': 'w', 'dub': 'w',
+          'ex': 'x', 'eks': 'x', 'ecks': 'x',
+          'why': 'y', 'wye': 'y', 'wi': 'y', 'way': 'y',
+          'zee': 'z', 'zed': 'z', 'ze': 'z', 'zay': 'z'
+        };
+        
+        // Buscar patrones de repetición
+        for (let i = 0; i < words.length - 1; i++) {
+          const currentWord = words[i].trim().toLowerCase();
+          const nextWord = words[i + 1].trim().toLowerCase();
+          
+          if (!currentWord || !nextWord) continue;
+          
+          // Detectar repetición exacta
+          if (currentWord === nextWord) {
+            const letter = letterSounds[currentWord] || enhancedLetterMap[currentWord];
+            if (letter && letter.length === 1) {
+              sequences.push(letter, letter);
+              console.log('🔄 Repetición exacta detectada:', currentWord, currentWord, '->', letter + letter);
+              i++; // Saltar la siguiente palabra ya procesada
+              continue;
+            }
+          }
+          
+          // Detectar repetición aproximada (para casos como 'ou' 'oh')
+          const currentLetter = letterSounds[currentWord] || enhancedLetterMap[currentWord];
+          const nextLetter = letterSounds[nextWord] || enhancedLetterMap[nextWord];
+          
+          if (currentLetter && nextLetter && currentLetter === nextLetter && currentLetter.length === 1) {
+            sequences.push(currentLetter, currentLetter);
+            console.log('🔄 Repetición aproximada detectada:', currentWord, nextWord, '->', currentLetter + currentLetter);
+            i++; // Saltar la siguiente palabra ya procesada
+            continue;
+          }
+          
+          // Detectar variaciones fonéticas de la misma letra
+          const phoneticVariations = {
+            'o': ['ou', 'oh', 'owe', 'eau', 'oscar'],
+            'a': ['ay', 'aye', 'eh', 'hey', 'alpha'],
+            'e': ['ee', 'hey', 'echo'],
+            'i': ['eye', 'aye', 'ai', 'high', 'india'],
+            'u': ['you', 'yu', 'ue', 'ooh', 'uniform']
+          };
+          
+          for (const [letter, variations] of Object.entries(phoneticVariations)) {
+            if (variations.includes(currentWord) && variations.includes(nextWord)) {
+              sequences.push(letter, letter);
+              console.log('🔄 Variación fonética repetida detectada:', currentWord, nextWord, '->', letter + letter);
+              i++; // Saltar la siguiente palabra ya procesada
+              break;
+            }
+          }
+        }
+        
+        return sequences;
+      };
+
+      // Función para detectar si el input parece deletreo
+      const isLikelySpelling = (transcript) => {
+        const words = transcript.toLowerCase().split(/\s+/);
+        
+        // Criterios para detectar deletreo:
+        // 1. Palabras cortas (1-3 caracteres típicamente)
+        // 2. Pausas entre palabras (indicativo de deletreo)
+        // 3. Patrones conocidos de pronunciación de letras
+        
+        let spellingIndicators = 0;
+        
+        for (const word of words) {
+          // Palabras de 1-3 caracteres son más probables de ser deletreo
+          if (word.length <= 3) spellingIndicators++;
+          
+          // Palabras que suenan como letras
+          if (['ay', 'bee', 'see', 'dee', 'ee', 'eff', 'gee', 'aitch', 'eye', 'jay'].includes(word)) {
+            spellingIndicators += 2;
+          }
+          
+          // Alfabeto NATO
+          if (['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot'].includes(word)) {
+            spellingIndicators += 2;
+          }
+        }
+        
+        // Si más del 70% de las palabras parecen deletreo, procesar
+        const spellingRatio = spellingIndicators / words.length;
+        return spellingRatio > 0.7;
+      };
+
+      // Función para detectar si el input contiene palabras completas
+      const containsCompleteWords = (transcript) => {
+        const commonWords = [
+          // Palabras comunes que no son deletreo
+          'hello', 'hi', 'yes', 'no', 'okay', 'ok', 'thanks', 'please',
+          'start', 'begin', 'ready', 'done', 'finished', 'next', 'again',
+          'good', 'bad', 'great', 'nice', 'well', 'fine', 'stop', 'wait',
+          'help', 'sorry', 'excuse', 'what', 'when', 'where', 'how', 'why',
+          'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of',
+          'with', 'by', 'from', 'up', 'about', 'into', 'through', 'during',
+          'before', 'after', 'above', 'below', 'between', 'among', 'under',
+          'over', 'inside', 'outside', 'is', 'are', 'was', 'were', 'be',
+          'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did',
+          'will', 'would', 'could', 'should', 'may', 'might', 'can', 'must',
+          'shall', 'this', 'that', 'these', 'those', 'some', 'any', 'many',
+          'much', 'few', 'little', 'all', 'both', 'each', 'every', 'either',
+          'neither', 'one', 'two', 'three', 'four', 'five', 'first', 'second',
+          'third', 'last', 'other', 'another', 'same', 'different', 'new',
+          'old', 'big', 'small', 'long', 'short', 'high', 'low', 'right',
+          'wrong', 'true', 'false', 'goodbye', 'maybe', 'perhaps', 'probably',
+          'definitely', 'actually', 'really', 'very', 'quite', 'rather',
+          'pretty', 'fairly', 'extremely', 'completely', 'totally', 'absolutely'
+        ];
+        
+        const words = transcript.toLowerCase().split(/\s+/);
+        
+        // Si detecta palabras completas de más de 3 letras, probablemente no es deletreo
+        for (const word of words) {
+          if (word.length > 3 && commonWords.includes(word)) {
+            console.log('🚫 Palabra completa detectada, ignorando:', word);
+            return true;
+          }
+        }
+        
+        // Detectar frases típicas de conversación
+        const conversationPhrases = [
+          'how are you', 'what is this', 'i dont know', 'i don\'t know',
+          'can you help', 'thank you', 'excuse me', 'i\'m sorry',
+          'what do you', 'how do you', 'where is the', 'what time is',
+          'good morning', 'good afternoon', 'good evening', 'good night',
+          'see you later', 'talk to you', 'nice to meet'
+        ];
+        
+        const fullText = transcript.toLowerCase();
+        for (const phrase of conversationPhrases) {
+          if (fullText.includes(phrase)) {
+            console.log('🚫 Frase conversacional detectada, ignorando:', phrase);
+            return true;
+          }
+        }
+        
+        return false;
+      };
+
+      // Función simplificada SOLO para deletreo
+      const processSpokenInput = (transcript) => {
+        console.log('🔤 Procesando input:', transcript);
+        
+        // Verificar si parece deletreo
+        if (!isLikelySpelling(transcript)) {
+          console.log('🚫 No parece deletreo, ignorando:', transcript);
+          return '';
+        }
+        
+        // Filtrar palabras completas y conversación
+        if (containsCompleteWords(transcript)) {
+          console.log('🚫 Input ignorado por contener palabras completas o conversación');
+          return '';
+        }
+        
+        // Mapeo mejorado de letras
+        const letterMap = {
+          // Letras básicas
+          'a': 'a', 'b': 'b', 'c': 'c', 'd': 'd', 'e': 'e', 'f': 'f', 'g': 'g', 'h': 'h',
+          'i': 'i', 'j': 'j', 'k': 'k', 'l': 'l', 'm': 'm', 'n': 'n', 'o': 'o', 'p': 'p',
+          'q': 'q', 'r': 'r', 's': 's', 't': 't', 'u': 'u', 'v': 'v', 'w': 'w', 'x': 'x',
+          'y': 'y', 'z': 'z',
+          
+          // Pronunciaciones comunes
+          'ay': 'a', 'bee': 'b', 'see': 'c', 'sea': 'c', 'dee': 'd', 'ee': 'e',
+          'eff': 'f', 'gee': 'g', 'aitch': 'h', 'eye': 'i', 'jay': 'j', 'kay': 'k',
+          'el': 'l', 'em': 'm', 'en': 'n', 'oh': 'o', 'pee': 'p', 'cue': 'q',
+          'are': 'r', 'ess': 's', 'tea': 't', 'you': 'u', 'vee': 'v',
+          'double you': 'w', 'doubleyou': 'w', 'ex': 'x', 'why': 'y', 'zee': 'z', 'zed': 'z',
+          
+          // Alfabeto fonético NATO
+          'alpha': 'a', 'bravo': 'b', 'charlie': 'c', 'delta': 'd', 'echo': 'e',
+          'foxtrot': 'f', 'golf': 'g', 'hotel': 'h', 'india': 'i', 'juliet': 'j',
+          'kilo': 'k', 'lima': 'l', 'mike': 'm', 'november': 'n', 'oscar': 'o',
+          'papa': 'p', 'quebec': 'q', 'romeo': 'r', 'sierra': 's', 'tango': 't',
+          'uniform': 'u', 'victor': 'v', 'whiskey': 'w', 'xray': 'x', 'x-ray': 'x',
+          'yankee': 'y', 'zulu': 'z',
+          
+          // Comandos especiales
+          'delete': 'DELETE', 'backspace': 'DELETE', 'clear': 'CLEAR', 'reset': 'CLEAR'
+        };
+        
+        const words = transcript.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/);
+        let letters = '';
+        
+        for (const word of words) {
+          const cleanWord = word.trim();
+          
+          if (letterMap[cleanWord]) {
+            if (cleanWord === 'delete' || cleanWord === 'backspace') {
+              return 'DELETE';
+            } else if (cleanWord === 'clear' || cleanWord === 'reset') {
+              return 'CLEAR';
+            } else {
+              letters += letterMap[cleanWord];
+              console.log('🔤 Letra detectada:', cleanWord, '->', letterMap[cleanWord]);
+            }
+          } else if (cleanWord.length === 1 && /[a-z]/.test(cleanWord)) {
+            letters += cleanWord;
+            console.log('🔤 Letra directa:', cleanWord);
+          }
+        }
+        
+        console.log('🔤 Letras extraídas:', letters);
+        return letters;
+      };
 
     // Función para verificar la palabra
       const checkSpelling = () => {
@@ -4704,6 +5346,25 @@
                         renderSpokenTextWithColors()
                       ),
                       
+                      // Botones de selección de palabras - NUEVA UBICACIÓN
+                      React.createElement('div', { className: 'mb-6' },
+                        React.createElement('div', { className: 'flex flex-col sm:flex-row gap-3 sm:gap-4' },
+                          React.createElement('button', {
+                            onClick: selectRandomWord,
+                            className: 'bg-black text-yellow-400 py-3 sm:py-4 px-6 sm:px-8 rounded-xl font-bold text-lg sm:text-xl transition-all duration-300 hover:bg-yellow-600 hover:text-black shadow-lg transform hover:scale-105 flex items-center justify-center gap-2 sm:gap-3 flex-1',
+                            disabled: isSpinning
+                          },
+                            React.createElement(Shuffle, { className: 'w-5 h-5 sm:w-6 sm:h-6' }),
+                            isSpinning ? 'Selecting...' : 'Word Selection'
+                          ),
+                          currentWord && React.createElement('button', {
+                            onClick: selectRandomWord,
+                            className: 'bg-gradient-to-r from-yellow-400 to-yellow-600 text-black py-2 sm:py-3 px-4 sm:px-6 rounded-xl font-bold text-sm sm:text-base transition-all duration-300 hover:from-yellow-500 hover:to-yellow-700 shadow-lg transform hover:scale-105 flex-1 border-2 border-black hover:border-yellow-800',
+                            disabled: isSpinning
+                          }, '🔄 Select New Word')
+                        )
+                      ),
+                      
                       // Controles de voz - responsive
                       React.createElement('div', { 
                         className: 'bg-gray-50 rounded-xl p-3 sm:p-4 border-2 border-gray-200' 
@@ -4751,7 +5412,61 @@
                               className: 'text-gray-600 text-center sm:text-left' 
                             },
                               isListening ? 
-                                '🔴 Listening... Say each letter clearly' : 
+                                React.createElement('div', { className: 'listening-status space-y-2' },
+                                  React.createElement('div', { className: 'flex items-center gap-2' },
+                                    React.createElement('span', { className: 'status-icon text-red-500' }, '🔴'),
+                                    React.createElement('span', { className: 'status-text font-semibold' }, 'Listening... Say each letter clearly')
+                                  ),
+                                  recognitionConfidence > 0 && React.createElement('div', { className: 'confidence-display' },
+                                    React.createElement('div', {
+                                      className: `confidence-bar px-2 py-1 rounded text-xs font-bold ${
+                                        recognitionConfidence > 0.8 ? 'bg-green-100 text-green-700' : 
+                                        recognitionConfidence > 0.6 ? 'bg-yellow-100 text-yellow-700' : 
+                                        'bg-red-100 text-red-700'
+                                      }`
+                                    }, `Confidence: ${Math.round(recognitionConfidence * 100)}%`),
+                                    lastRecognizedText && React.createElement('div', {
+                                      className: 'last-heard text-xs text-blue-600 italic mt-1'
+                                    }, `Last heard: "${lastRecognizedText}"`)
+                                  ),
+                                  React.createElement('div', { className: 'real-time-feedback mt-2' },
+                                    // Nueva estructura horizontal mejorada para Current, Target y Progress
+                                    React.createElement('div', { className: 'grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4' },
+                                      // Current (Izquierda)
+                                      spokenText && React.createElement('div', { className: 'text-center' },
+                                        React.createElement('div', { className: 'text-xs font-medium text-gray-600 mb-1' }, 'Current'),
+                                        React.createElement('div', { className: 'current-spelling' },
+                                          React.createElement('strong', { className: 'text-blue-600 text-sm font-mono' }, spokenText.toUpperCase())
+                                        )
+                                      ),
+                                      // Target (Centro)
+                                      currentWord && React.createElement('div', { className: 'text-center' },
+                                        React.createElement('div', { className: 'text-xs font-medium text-gray-600 mb-1' }, 'Target'),
+                                        React.createElement('div', { className: 'target-word' },
+                                          React.createElement('strong', { className: 'text-gray-800 text-sm font-mono' }, currentWord.word.toUpperCase())
+                                        )
+                                      ),
+                                      // Progress Indicator (Derecha)
+                                      currentWord && React.createElement('div', { className: 'text-center' },
+                                        React.createElement('div', { className: 'text-xs font-medium text-gray-600 mb-1' }, 'Progress'),
+                                        React.createElement('div', { className: 'progress-indicator flex gap-1 flex-wrap justify-center' },
+                                          currentWord.word.split('').map((letter, index) =>
+                                            React.createElement('span', {
+                                              key: index,
+                                              className: `letter px-1 py-0.5 rounded text-xs font-mono ${
+                                                index < spokenText.length ? 
+                                                  (spokenText[index]?.toLowerCase() === letter.toLowerCase() ? 
+                                                    'bg-green-200 text-green-800 correct' : 
+                                                    'bg-red-200 text-red-800 incorrect') : 
+                                                  'bg-gray-200 text-gray-600 pending'
+                                              }`
+                                            }, letter.toUpperCase())
+                                          )
+                                        )
+                                      )
+                                    )
+                                  )
+                                ) : 
                                 recognitionReady ? '🟡 Ready to listen' : '⚪ Click microphone to start'
                             ),
                             isCorrect !== null && React.createElement('div', {
@@ -4802,25 +5517,21 @@
                         }`
                       }, isCorrect ? '✅ Correct! Well done!' : '❌ Try again!')
                     ) :
-                    React.createElement('div', { className: 'text-lg sm:text-2xl text-gray-600 font-semibold text-center py-8' },
-                      'Press "Word Selection" to start'
+                    React.createElement('div', { className: 'space-y-4' },
+                      React.createElement('div', { className: 'text-lg sm:text-2xl text-gray-600 font-semibold text-center py-8' },
+                        'Press "Word Selection" to start'
+                      ),
+                      React.createElement('div', { className: 'text-center' },
+                        React.createElement('button', {
+                          onClick: selectRandomWord,
+                          className: 'bg-black text-yellow-400 py-3 sm:py-4 px-6 sm:px-8 rounded-xl font-bold text-lg sm:text-xl transition-all duration-300 hover:bg-yellow-600 hover:text-black shadow-lg transform hover:scale-105 flex items-center justify-center gap-2 sm:gap-3 mx-auto',
+                          disabled: isSpinning
+                        },
+                          React.createElement(Shuffle, { className: 'w-5 h-5 sm:w-6 sm:h-6' }),
+                          isSpinning ? 'Selecting...' : 'Word Selection'
+                        )
+                      )
                     )
-              ),
-              
-              React.createElement('div', { className: 'mt-6 sm:mt-8 space-y-3 sm:space-y-4' },
-                React.createElement('button', {
-                  onClick: selectRandomWord,
-                  className: 'bg-black text-yellow-400 py-3 sm:py-4 px-6 sm:px-8 rounded-xl font-bold text-lg sm:text-xl transition-all duration-300 hover:bg-yellow-600 hover:text-black shadow-lg transform hover:scale-105 flex items-center justify-center gap-2 sm:gap-3 mx-auto',
-                  disabled: isSpinning
-                },
-                  React.createElement(Shuffle, { className: 'w-5 h-5 sm:w-6 sm:h-6' }),
-                  isSpinning ? 'Selecting...' : 'Word Selection'
-                ),
-                currentWord && React.createElement('button', {
-                  onClick: selectRandomWord,
-                  className: 'bg-white text-black py-2 sm:py-3 px-4 sm:px-6 rounded-xl font-bold text-sm sm:text-base transition-all duration-300 hover:bg-amber-200 shadow-lg transform hover:scale-105 mx-auto block',
-                  disabled: isSpinning
-                }, 'Select New Word')
               )
             )
           ),
@@ -4925,26 +5636,26 @@
           setExpandedSection(prev => prev === section ? null : section);
         };
 
-        return React.createElement('div', { className: 'min-h-screen bg-gradient-to-br from-yellow-400 via-yellow-300 to-amber-400 p-8' },
+        return React.createElement('div', { className: 'min-h-screen bg-gradient-to-br from-yellow-400 via-yellow-300 to-amber-400 p-4 sm:p-8' },
           React.createElement('div', { className: 'max-w-6xl mx-auto' },
-            React.createElement('div', { className: 'flex items-center justify-between mb-8' },
+            React.createElement('div', { className: 'flex items-center justify-between mb-6 sm:mb-8' },
               React.createElement('button', {
                 onClick: () => setCurrentScreen('home'),
-                className: 'bg-black text-yellow-400 p-3 rounded-full hover:bg-yellow-600 hover:text-black transition-all duration-300 shadow-lg'
-              }, React.createElement(ArrowLeft, { className: 'w-6 h-6' })),
-              React.createElement('h1', { className: 'text-4xl font-bold text-black' }, 'Instructions'),
-              React.createElement('div', { className: 'w-12' })
+                className: 'bg-black text-yellow-400 p-2 sm:p-3 rounded-full hover:bg-yellow-600 hover:text-black transition-all duration-300 shadow-lg'
+              }, React.createElement(ArrowLeft, { className: 'w-5 h-5 sm:w-6 sm:h-6' })),
+              React.createElement('h1', { className: 'text-2xl sm:text-4xl font-bold text-black' }, 'Instructions'),
+              React.createElement('div', { className: 'w-8 sm:w-12' })
             ),
-            React.createElement('div', { className: 'bg-white rounded-2xl p-8 shadow-2xl border-4 border-black' },
-              React.createElement('div', { className: 'flex gap-8' },
+            React.createElement('div', { className: 'bg-white rounded-2xl p-4 sm:p-8 shadow-2xl border-4 border-black' },
+              React.createElement('div', { className: 'flex flex-col lg:flex-row gap-4 sm:gap-8' },
                 // Panel izquierdo: Hexágonos en patrón de panal
                 React.createElement('div', { 
-                  className: 'flex-shrink-0',
+                  className: 'flex-shrink-0 w-full lg:w-auto mx-auto lg:mx-0',
                   style: {
-                    width: '400px',
+                    maxWidth: '350px',
                     background: 'linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%)',
                     borderRadius: '20px',
-                    padding: '50px 30px',
+                    padding: '30px 20px',
                     position: 'relative',
                     border: '3px solid #000'
                   }
@@ -4956,14 +5667,14 @@
                       flexDirection: 'column',
                       alignItems: 'center',
                       position: 'relative',
-                      gap: '25px' // Aumentado de 15px a 25px para mayor separación vertical
+                      gap: '15px' // Reducido para móviles
                     }
                   },
                     // Primera fila: 2 hexágonos (rotados 90 grados con mayor separación) de arriba
                     React.createElement('div', {
                       style: {
                         display: 'flex',
-                        gap: '50px', // Aumentado de 15px a 35px para coincidir con la fila inferior
+                        gap: '25px', // Reducido para móviles
                         justifyContent: 'center'
                       }
                     },
@@ -5078,7 +5789,7 @@
                     React.createElement('div', {
                       style: {
                         display: 'flex',
-                        gap: '50px',
+                        gap: '25px', // Reducido para móviles
                         justifyContent: 'center'
                       }
                     },
@@ -5253,31 +5964,31 @@
                 ),
                 
                 // Panel derecho: Contenido expandido
-                React.createElement('div', { className: 'flex-1' },
+                React.createElement('div', { className: 'flex-1 min-h-[400px] lg:min-h-0' },
                   !expandedSection && React.createElement('div', { className: 'flex items-center justify-center h-full' },
                     React.createElement('div', { className: 'text-center text-gray-500' },
                       React.createElement('div', { className: 'text-6xl mb-4' }, '🐝'),
-                      React.createElement('h3', { className: 'text-2xl font-bold mb-2' }, 'Selecciona una sección'),
-                      React.createElement('p', { className: 'text-lg' }, 'Haz clic en cualquier hexágono para ver su contenido')
+                      React.createElement('h3', { className: 'text-xl sm:text-2xl font-bold mb-2' }, 'Selecciona una sección'),
+                      React.createElement('p', { className: 'text-base sm:text-lg' }, 'Haz clic en cualquier hexágono para ver su contenido')
                     )
                   ),
                   
-                  expandedSection === 'objective' && React.createElement('div', { className: 'p-6 bg-green-50 rounded-lg border-4 border-green-500 h-full' },
-                    React.createElement('h3', { className: 'text-3xl font-bold mb-6 text-green-700 flex items-center' },
+                  expandedSection === 'objective' && React.createElement('div', { className: 'p-4 sm:p-6 bg-green-50 rounded-lg border-4 border-green-500 h-full' },
+                    React.createElement('h3', { className: 'text-2xl sm:text-3xl font-bold mb-4 sm:mb-6 text-green-700 flex items-center' },
                       React.createElement('span', { className: 'mr-3 text-4xl' }, '🎯'),
                       'Game Objective'
                     ),
-                    React.createElement('p', { className: 'text-xl text-gray-800 leading-relaxed' },
+                    React.createElement('p', { className: 'text-lg sm:text-xl text-gray-800 leading-relaxed' },
                       'Spelling Bee is a game where you must correctly spell English words. Each word comes with its phonetic pronunciation to help you learn it better.'
                     )
                   ),
                   
-                  expandedSection === 'levels' && React.createElement('div', { className: 'p-6 bg-blue-50 rounded-lg border-4 border-blue-500 h-full' },
-                    React.createElement('h3', { className: 'text-3xl font-bold mb-6 text-blue-700 flex items-center' },
+                  expandedSection === 'levels' && React.createElement('div', { className: 'p-4 sm:p-6 bg-blue-50 rounded-lg border-4 border-blue-500 h-full' },
+                    React.createElement('h3', { className: 'text-2xl sm:text-3xl font-bold mb-4 sm:mb-6 text-blue-700 flex items-center' },
                       React.createElement('span', { className: 'mr-3 text-4xl' }, '📚'),
                       'Available Levels'
                     ),
-                    React.createElement('ul', { className: 'space-y-4 text-xl text-gray-800' },
+                    React.createElement('ul', { className: 'space-y-4 text-lg sm:text-xl text-gray-800' },
                       React.createElement('li', { className: 'flex items-center p-4 bg-white rounded-lg shadow' },
                         React.createElement('span', { className: 'w-4 h-4 bg-blue-500 rounded-full mr-4' }),
                         React.createElement('div', null,
@@ -5302,12 +6013,12 @@
                     )
                   ),
                   
-                  expandedSection === 'modes' && React.createElement('div', { className: 'p-6 bg-purple-50 rounded-lg border-4 border-purple-500 h-full' },
-                    React.createElement('h3', { className: 'text-3xl font-bold mb-6 text-purple-700 flex items-center' },
+                  expandedSection === 'modes' && React.createElement('div', { className: 'p-4 sm:p-6 bg-purple-50 rounded-lg border-4 border-purple-500 h-full' },
+                    React.createElement('h3', { className: 'text-2xl sm:text-3xl font-bold mb-4 sm:mb-6 text-purple-700 flex items-center' },
                       React.createElement('span', { className: 'mr-3 text-4xl' }, '🎮'),
                       'Game Modes'
                     ),
-                    React.createElement('ul', { className: 'space-y-4 text-xl text-gray-800' },
+                    React.createElement('ul', { className: 'space-y-4 text-lg sm:text-xl text-gray-800' },
                       React.createElement('li', { className: 'flex items-center p-4 bg-white rounded-lg shadow' },
                         React.createElement('span', { className: 'w-4 h-4 bg-purple-500 rounded-full mr-4' }),
                         React.createElement('div', null,
@@ -5325,12 +6036,12 @@
                     )
                   ),
                   
-                  expandedSection === 'howToPlay' && React.createElement('div', { className: 'p-6 bg-orange-50 rounded-lg border-4 border-orange-500 h-full' },
-                    React.createElement('h3', { className: 'text-3xl font-bold mb-6 text-orange-700 flex items-center' },
+                  expandedSection === 'howToPlay' && React.createElement('div', { className: 'p-4 sm:p-6 bg-orange-50 rounded-lg border-4 border-orange-500 h-full' },
+                    React.createElement('h3', { className: 'text-2xl sm:text-3xl font-bold mb-4 sm:mb-6 text-orange-700 flex items-center' },
                       React.createElement('span', { className: 'mr-3 text-4xl' }, '🎲'),
                       'How to Play'
                     ),
-                    React.createElement('ol', { className: 'space-y-4 text-xl text-gray-800 list-none' },
+                    React.createElement('ol', { className: 'space-y-4 text-lg sm:text-xl text-gray-800 list-none' },
                       React.createElement('li', { className: 'flex items-center p-4 bg-white rounded-lg shadow' },
                         React.createElement('span', { className: 'w-8 h-8 bg-orange-500 text-white rounded-full flex items-center justify-center mr-4 font-bold' }, '1'),
                         'Select your difficulty level'
@@ -5358,12 +6069,12 @@
                     )
                   ),
                   
-                  expandedSection === 'features' && React.createElement('div', { className: 'p-6 bg-red-50 rounded-lg border-4 border-red-500 h-full' },
-                    React.createElement('h3', { className: 'text-3xl font-bold mb-6 text-red-700 flex items-center' },
+                  expandedSection === 'features' && React.createElement('div', { className: 'p-4 sm:p-6 bg-red-50 rounded-lg border-4 border-red-500 h-full' },
+                    React.createElement('h3', { className: 'text-2xl sm:text-3xl font-bold mb-4 sm:mb-6 text-red-700 flex items-center' },
                       React.createElement('span', { className: 'mr-3 text-4xl' }, '🔧'),
                       'Features'
                     ),
-                    React.createElement('ul', { className: 'space-y-4 text-xl text-gray-800' },
+                    React.createElement('ul', { className: 'space-y-4 text-lg sm:text-xl text-gray-800' },
                       React.createElement('li', { className: 'flex items-center p-4 bg-white rounded-lg shadow' },
                         React.createElement('span', { className: 'w-4 h-4 bg-red-500 rounded-full mr-4' }),
                         'Audio pronunciation for each word'
