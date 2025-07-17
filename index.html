@@ -422,7 +422,7 @@
               if (recognitionInstance) {
                 recognitionInstance.manualStop();
               }
-            } else if (event.results[event.results.length - 1].isFinal && currentWord && newText.toLowerCase() !== currentWord.word.toLowerCase()) {
+            } else if (event.results[event.results.length - 1].isFinal && currentWord && newText.length >= currentWord.word.length && newText.toLowerCase() !== currentWord.word.toLowerCase()) {
               setShowErrorModal(true);
             }
             return newText;
