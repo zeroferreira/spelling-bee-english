@@ -230,6 +230,16 @@
     // Referencias para acceder a los valores actuales en los callbacks
     const currentWordRef = useRef(null);
     const shouldKeepListeningRef = useRef(false);
+    
+    // Actualizar la referencia cuando currentWord cambie
+    useEffect(() => {
+      currentWordRef.current = currentWord;
+    }, [currentWord]);
+    
+    // Actualizar la referencia cuando shouldKeepListening cambie
+    useEffect(() => {
+      shouldKeepListeningRef.current = shouldKeepListening;
+    }, [shouldKeepListening]);
 
 
     // Cargar voces disponibles
@@ -387,6 +397,9 @@
       let lastInterimResult = ''; // Para gestionar el texto provisional
       
       recognitionInstance.onresult = (event) => {
+        // Detectar dispositivo móvil
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        
         let interimTranscript = '';
         let finalTranscript = '';
 
@@ -396,6 +409,11 @@
           } else {
             interimTranscript += event.results[i][0].transcript;
           }
+        }
+
+        // En móviles, ser más selectivo con los resultados provisionales
+        if (isMobile && interimTranscript && interimTranscript === lastInterimResult) {
+          return; // Evitar procesar el mismo resultado provisional
         }
 
         // Si hay un resultado final, lo procesamos y lo añadimos al texto estable
@@ -416,29 +434,62 @@
             }
             lastInterimResult = ''; // Limpiamos el provisional
 
-            // Solo detener si la palabra está completa y correcta
-            if (currentWord && newText.toLowerCase() === currentWord.word.toLowerCase()) {
+            if (newText.toLowerCase().trim() === currentWord.word.toLowerCase()) {
+              setIsCorrect(true);
               setShowSuccessModal(true);
-              if (recognitionInstance) {
-                recognitionInstance.manualStop();
+              if (recognition && recognition.manualStop) {
+                recognition.manualStop();
               }
-            } else if (event.results[event.results.length - 1].isFinal && currentWord && newText.length >= currentWord.word.length && newText.toLowerCase() !== currentWord.word.toLowerCase()) {
-              setShowErrorModal(true);
+              return newText;
             }
+            
+            // Mostrar error si el texto excede la longitud de la palabra objetivo (solo para resultados finales)
+            if (finalTranscript && newText.toLowerCase().trim().length > currentWord.word.length) {
+              setShowErrorModal(true);
+              if (recognition && recognition.manualStop) {
+                recognition.manualStop();
+              }
+              return newText;
+            }
+            
             return newText;
           });
         } 
-        // Si solo hay resultado provisional, lo mostramos en tiempo real
+        // Si solo hay resultado provisional, lo mostramos en tiempo real SIN verificar errores
         else if (interimTranscript) {
           const result = processSpokenInput(interimTranscript.toLowerCase().trim());
-          setSpokenText(prev => {
-            const base = prev.endsWith(lastInterimResult) 
-                ? prev.substring(0, prev.length - lastInterimResult.length) 
-                : prev;
-            
-            lastInterimResult = result; // Guardamos el nuevo provisional
-            return base + result;
-          });
+          
+          // Evitar duplicación en móviles
+          if (result && result !== lastInterimResult) {
+            setSpokenText(prev => {
+              const base = prev.endsWith(lastInterimResult) 
+                  ? prev.substring(0, prev.length - lastInterimResult.length) 
+                  : prev;
+              
+              lastInterimResult = result; // Guardamos el nuevo provisional
+              const newText = base + result;
+              
+              if (newText.toLowerCase().trim() === currentWord.word.toLowerCase()) {
+                setIsCorrect(true);
+                setShowSuccessModal(true);
+                if (recognition && recognition.manualStop) {
+                  recognition.manualStop();
+                }
+                return newText;
+              }
+              
+              // No mostrar error para texto provisional - solo verificar cuando sea final
+              // if (newText.toLowerCase().trim().length > currentWord.word.length) {
+              //   setShowErrorModal(true);
+              //   if (recognition && recognition.manualStop) {
+              //     recognition.manualStop();
+              //   }
+              //   return newText;
+              // }
+              
+              return newText;
+            });
+          }
         }
       };
       
@@ -1334,16 +1385,23 @@
 
     // Función para verificar la palabra
       const checkSpelling = () => {
-        if (currentWord && spokenText.toLowerCase() === currentWord.word.toLowerCase()) {
-          setIsCorrect(true);
-          setShowSuccessModal(true);
-          // Detener reconocimiento de voz si está activo
-          if (isListening && recognition) {
-            recognition.manualStop();
+        if (currentWord && spokenText.trim()) {
+          const spoken = spokenText.toLowerCase().trim();
+          const target = currentWord.word.toLowerCase();
+          
+          if (spoken === target) {
+            setIsCorrect(true);
+            setShowSuccessModal(true);
+            // Detener reconocimiento de voz si está activo
+            if (isListening && recognition) {
+              recognition.manualStop();
+            }
+          } else {
+            setShowErrorModal(true);
+            if (recognition && recognition.manualStop) {
+              recognition.manualStop();
+            }
           }
-        } else {
-          setIsCorrect(false);
-          setShowErrorModal(true);
         }
       };
 
@@ -1351,19 +1409,7 @@
       const clearSpokenText = () => {
           setSpokenText('');
           setIsCorrect(null);
-          // Reiniciar el reconocimiento si estaba activo
-          if (isListening && recognition) {
-            try {
-              recognition.manualStop();
-              setTimeout(() => {
-                if (shouldKeepListening) {
-                  recognition.start();
-                }
-              }, 500);
-            } catch (error) {
-              console.error('Error al reiniciar reconocimiento:', error);
-            }
-          }
+          // No reiniciar automáticamente el reconocimiento, solo limpiar
         };
 
     // Palabras del Level A con fonética
@@ -5022,6 +5068,12 @@
         setIsSpinning(true);
         setAnimationStep(0);
         setSpokenText(''); // Limpiar el texto deletreado
+        setIsCorrect(null); // Limpiar el estado de corrección
+        
+        // Detener reconocimiento de voz si está activo
+        if (isListening && recognition) {
+          recognition.manualStop();
+        }
         
         const numbers = Array.from({length: 10}, (_, i) => i + 1);
         let currentIndex = 0;
@@ -5049,6 +5101,12 @@
         setShowDefinition(false);
         setShowExample(false);
         setSpokenText(''); // Limpiar el texto deletreado
+        setIsCorrect(null); // Limpiar el estado de corrección
+        
+        // Detener reconocimiento de voz si está activo
+        if (isListening && recognition) {
+          recognition.manualStop();
+        }
       };
 
       const SuccessModal = () => {
@@ -5074,7 +5132,51 @@
       const ErrorModal = () => {
         const handleClose = () => {
           setShowErrorModal(false);
-          setSpokenText(''); // Clear the text to allow a new attempt
+          setSpokenText(''); // Limpiar el texto deletreado
+          // No avanzar automáticamente a la siguiente palabra, permitir que el usuario intente de nuevo
+        };
+
+        // Función para renderizar las letras con colores en el modal
+        const renderErrorLetters = () => {
+          if (!currentWord || !spokenText) {
+            return React.createElement('div', {
+              className: 'text-white text-center py-2'
+            }, 'No spelling detected');
+          }
+
+          const target = currentWord.word.toLowerCase();
+          const spoken = spokenText.toLowerCase().trim();
+          const letters = [];
+
+          for (let i = 0; i < Math.max(target.length, spoken.length); i++) {
+            const spokenLetter = spoken[i] || '';
+            const targetLetter = target[i] || '';
+            
+            let letterClass = 'inline-block text-sm sm:text-base font-mono font-bold mx-1 px-2 py-1 rounded border-2 ';
+            let displayLetter = spokenLetter || '?';
+            
+            if (i < spoken.length) {
+              if (spokenLetter === targetLetter) {
+                letterClass += 'text-green-800 bg-green-200 border-green-400';
+              } else {
+                letterClass += 'text-red-800 bg-red-200 border-red-400';
+              }
+            } else {
+              letterClass += 'text-gray-600 bg-gray-200 border-gray-400';
+              displayLetter = targetLetter;
+            }
+            
+            letters.push(
+              React.createElement('span', {
+                key: i,
+                className: letterClass
+              }, displayLetter.toUpperCase())
+            );
+          }
+
+          return React.createElement('div', {
+            className: 'flex flex-wrap justify-center items-center gap-1'
+          }, ...letters);
         };
 
         return React.createElement('div', {
@@ -5084,11 +5186,25 @@
           className: 'bg-gradient-to-br from-red-400 to-red-600 text-white p-6 sm:p-8 rounded-2xl shadow-2xl text-center transform scale-100 w-full max-w-sm sm:max-w-md' 
         },
           React.createElement('h2', { className: 'text-3xl sm:text-5xl font-bold mb-3 sm:mb-4' }, 'Incorrect!'),
-          React.createElement('p', { className: 'text-base sm:text-xl mb-4 sm:mb-6' }, `Try spelling: ${currentWord.word}`),
-          React.createElement('button', {
-            onClick: handleClose,
-            className: 'bg-white text-red-500 font-bold py-2 sm:py-3 px-6 sm:px-8 rounded-full text-base sm:text-lg transition-transform transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-red-300 w-full sm:w-auto'
-          }, 'Next Word')
+          React.createElement('p', { className: 'text-base sm:text-xl mb-2' }, `Try spelling: ${currentWord.word}`),
+          // Nueva sección con los cuadritos de letras
+          spokenText && React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-lg p-4 mb-4' },
+            React.createElement('p', { className: 'text-sm text-yellow-200 mb-2' }, 'Your spelling:'),
+            renderErrorLetters()
+          ),
+          React.createElement('div', { className: 'flex flex-col sm:flex-row gap-3 justify-center' },
+            React.createElement('button', {
+              onClick: handleClose,
+              className: 'bg-white text-red-500 font-bold py-2 sm:py-3 px-6 sm:px-8 rounded-full text-base sm:text-lg transition-transform transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-red-300'
+            }, 'Try Again'),
+            React.createElement('button', {
+              onClick: () => {
+                setShowErrorModal(false);
+                selectRandomWord();
+              },
+              className: 'bg-yellow-400 text-red-600 font-bold py-2 sm:py-3 px-6 sm:px-8 rounded-full text-base sm:text-lg transition-transform transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-yellow-300'
+            }, 'Next Word')
+          )
         ));
       };
 
@@ -5242,13 +5358,13 @@
           }, 'Start spelling...');
         }
 
-        const targetWord = currentWord.word.toLowerCase();
-        const spoken = spokenText.toLowerCase();
+        const target = currentWord.word.toLowerCase();
+        const spoken = spokenText.toLowerCase().trim();
         const letters = [];
 
-        for (let i = 0; i < Math.max(targetWord.length, spoken.length); i++) {
+        for (let i = 0; i < Math.max(target.length, spoken.length); i++) {
           const spokenLetter = spoken[i] || '';
-          const targetLetter = targetWord[i] || '';
+          const targetLetter = target[i] || '';
           
           let letterClass = 'inline-block text-lg sm:text-xl lg:text-2xl font-mono font-bold mx-1 px-2 py-2 rounded-lg transition-all duration-300 ';
           
