@@ -279,9 +279,9 @@
              } catch(e) { console.log('Error al detener recognition:', e); }
           }
         }
-        // Verificar error (solo si es más largo que la palabra objetivo)
-        else if (cleanSpoken.length > target.length) {
-          console.log('❌ Longitud excedida, error.');
+        // Verificar error (si longitud es igual o mayor y no es éxito)
+        else if (cleanSpoken.length >= target.length) {
+          console.log('❌ Error detectado (longitud alcanzada o excedida).');
           setShowErrorModal(true);
           if (recognition) {
              try {
@@ -1405,45 +1405,15 @@
       const processSpokenInput = (transcript) => {
         console.log('🔤 Procesando input:', transcript);
         
-        // --- NUEVO: IGNORAR LA PALABRA OBJETIVO AL INICIO ---
-        // Si el usuario dice "Camel c a m e l", eliminamos "Camel" del inicio.
-        let processedTranscript = transcript.toLowerCase();
-        
-        if (currentWordRef.current) {
-             const targetWord = currentWordRef.current.word.toLowerCase();
-             // Eliminamos la palabra objetivo si aparece completa
-             // Usamos una expresión regular para asegurar que sea palabra completa y no parte de otra
-             // Reemplazamos todas las ocurrencias para manejar "Camel c a m e l Camel"
-             const targetRegex = new RegExp(`\\b${targetWord}\\b`, 'gi');
-             
-             if (targetRegex.test(processedTranscript)) {
-                 console.log(`🚫 Palabra objetivo "${targetWord}" detectada y filtrada del input.`);
-                 processedTranscript = processedTranscript.replace(targetRegex, '').trim();
-             }
-        }
-        
-        // Si después de filtrar no queda nada (solo dijo la palabra), retornamos vacío
-        if (!processedTranscript) {
-            return '';
-        }
-
-        // Usamos el transcript procesado de aquí en adelante
-        // Nota: ya tenemos 'processedTranscript' limpio arriba
-        
-        // Verificar si parece deletreo (usando las palabras restantes)
-        // Nota: Si el usuario dijo "Camel c", ahora 'words' es ["c"].
-        // "c" es corto, así que isLikelySpelling debería pasar.
-        
-        // Recalculamos isLikelySpelling con el transcript procesado
-        // Pero isLikelySpelling espera un string, no array
-        if (!isLikelySpelling(processedTranscript)) {
-          console.log('🚫 No parece deletreo (post-filtro), ignorando:', processedTranscript);
+        // Verificar si parece deletreo
+        if (!isLikelySpelling(transcript)) {
+          console.log('🚫 No parece deletreo, ignorando:', transcript);
           return '';
         }
         
-        // Filtrar palabras completas y conversación (también con el transcript procesado)
-        if (containsCompleteWords(processedTranscript)) {
-          console.log('🚫 Input ignorado por contener palabras completas o conversación (post-filtro)');
+        // Filtrar palabras completas y conversación
+        if (containsCompleteWords(transcript)) {
+          console.log('🚫 Input ignorado por contener palabras completas o conversación');
           return '';
         }
         
@@ -1474,10 +1444,10 @@
           'delete': 'DELETE', 'backspace': 'DELETE', 'clear': 'CLEAR', 'reset': 'CLEAR'
         };
         
-        const finalWords = processedTranscript.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/);
+        const words = transcript.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/);
         let letters = '';
         
-        for (const word of finalWords) {
+        for (const word of words) {
           const cleanWord = word.trim();
           
           if (letterMap[cleanWord]) {
