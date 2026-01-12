@@ -256,30 +256,41 @@
       speechSynthesis.onvoiceschanged = loadVoices;
     }, []);
 
-    // Efecto para verificar la palabra cuando spokenText cambia
+    // Efecto mejorado para verificación de palabra
     useEffect(() => {
       // Solo verificar si hay una palabra actual y texto hablado
       if (currentWord && spokenText) {
-        const cleanSpoken = spokenText.toLowerCase().trim();
-        const target = currentWord.word.toLowerCase();
+        // Normalización agresiva: minúsculas y sin espacios
+        const cleanSpoken = spokenText.toLowerCase().replace(/\s+/g, '');
+        const target = currentWord.word.toLowerCase().replace(/\s+/g, '');
         
+        console.log(`🔍 Verificando: "${cleanSpoken}" vs "${target}"`);
+
         // Verificar éxito
         if (cleanSpoken === target) {
+          console.log('✅ ¡Coincidencia exacta detectada!');
           setIsCorrect(true);
           setShowSuccessModal(true);
-          if (recognition && recognition.manualStop) {
-            recognition.manualStop();
+          
+          // Detener reconocimiento de forma segura
+          if (recognition) {
+             try {
+               recognition.manualStop();
+             } catch(e) { console.log('Error al detener recognition:', e); }
           }
         }
         // Verificar error (solo si es más largo que la palabra objetivo)
         else if (cleanSpoken.length > target.length) {
+          console.log('❌ Longitud excedida, error.');
           setShowErrorModal(true);
-          if (recognition && recognition.manualStop) {
-            recognition.manualStop();
+          if (recognition) {
+             try {
+               recognition.manualStop();
+             } catch(e) { console.log('Error al detener recognition:', e); }
           }
         }
       }
-    }, [spokenText, currentWord]); // Dependencias cruciales
+    }, [spokenText, currentWord, recognition]); // Añadido recognition a dependencias
 
     // Configuración optimizada para móviles
     const optimizeForMobile = () => {
@@ -550,10 +561,12 @@
               const newText = base + textToAdd;
               
               if (newText.toLowerCase().trim() === currentWordRef.current?.word.toLowerCase()) {
-                // La verificación se hace en el useEffect, pero podemos detener aquí para respuesta inmediata
+                setIsCorrect(true);
+                setShowSuccessModal(true);
                 if (recognition && recognition.manualStop) {
-                   recognition.manualStop();
+                  recognition.manualStop();
                 }
+                return newText;
               }
               
               return newText;
@@ -565,11 +578,6 @@
       recognitionInstance.onerror = (event) => {
         console.error('❌ Error de reconocimiento:', event.error);
         
-        // Ignorar error 'no-speech' silenciosamente en móviles para evitar spam de alertas
-        if (event.error === 'no-speech') {
-             return;
-        }
-
         const timeouts = optimizeForMobile().timeouts;
         
         switch(event.error) {
