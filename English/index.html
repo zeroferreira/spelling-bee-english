@@ -256,7 +256,30 @@
       speechSynthesis.onvoiceschanged = loadVoices;
     }, []);
 
-
+    // Efecto para verificar la palabra cuando spokenText cambia
+    useEffect(() => {
+      // Solo verificar si hay una palabra actual y texto hablado
+      if (currentWord && spokenText) {
+        const cleanSpoken = spokenText.toLowerCase().trim();
+        const target = currentWord.word.toLowerCase();
+        
+        // Verificar éxito
+        if (cleanSpoken === target) {
+          setIsCorrect(true);
+          setShowSuccessModal(true);
+          if (recognition && recognition.manualStop) {
+            recognition.manualStop();
+          }
+        }
+        // Verificar error (solo si es más largo que la palabra objetivo)
+        else if (cleanSpoken.length > target.length) {
+          setShowErrorModal(true);
+          if (recognition && recognition.manualStop) {
+            recognition.manualStop();
+          }
+        }
+      }
+    }, [spokenText, currentWord]); // Dependencias cruciales
 
     // Configuración optimizada para móviles
     const optimizeForMobile = () => {
@@ -527,12 +550,10 @@
               const newText = base + textToAdd;
               
               if (newText.toLowerCase().trim() === currentWordRef.current?.word.toLowerCase()) {
-                setIsCorrect(true);
-                setShowSuccessModal(true);
+                // La verificación se hace en el useEffect, pero podemos detener aquí para respuesta inmediata
                 if (recognition && recognition.manualStop) {
-                  recognition.manualStop();
+                   recognition.manualStop();
                 }
-                return newText;
               }
               
               return newText;
@@ -544,6 +565,11 @@
       recognitionInstance.onerror = (event) => {
         console.error('❌ Error de reconocimiento:', event.error);
         
+        // Ignorar error 'no-speech' silenciosamente en móviles para evitar spam de alertas
+        if (event.error === 'no-speech') {
+             return;
+        }
+
         const timeouts = optimizeForMobile().timeouts;
         
         switch(event.error) {
