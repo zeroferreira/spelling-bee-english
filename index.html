@@ -256,7 +256,41 @@
       speechSynthesis.onvoiceschanged = loadVoices;
     }, []);
 
+    // Efecto mejorado para verificación de palabra
+    useEffect(() => {
+      // Solo verificar si hay una palabra actual y texto hablado
+      if (currentWord && spokenText) {
+        // Normalización agresiva: minúsculas y sin espacios
+        const cleanSpoken = spokenText.toLowerCase().replace(/\s+/g, '');
+        const target = currentWord.word.toLowerCase().replace(/\s+/g, '');
+        
+        console.log(`🔍 Verificando: "${cleanSpoken}" vs "${target}"`);
 
+        // Verificar éxito
+        if (cleanSpoken === target) {
+          console.log('✅ ¡Coincidencia exacta detectada!');
+          setIsCorrect(true);
+          setShowSuccessModal(true);
+          
+          // Detener reconocimiento de forma segura
+          if (recognition) {
+             try {
+               recognition.manualStop();
+             } catch(e) { console.log('Error al detener recognition:', e); }
+          }
+        }
+        // Verificar error (solo si es más largo que la palabra objetivo)
+        else if (cleanSpoken.length > target.length) {
+          console.log('❌ Longitud excedida, error.');
+          setShowErrorModal(true);
+          if (recognition) {
+             try {
+               recognition.manualStop();
+             } catch(e) { console.log('Error al detener recognition:', e); }
+          }
+        }
+      }
+    }, [spokenText, currentWord, recognition]); // Añadido recognition a dependencias
 
     // Configuración optimizada para móviles
     const optimizeForMobile = () => {
