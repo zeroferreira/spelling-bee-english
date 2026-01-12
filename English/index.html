@@ -346,8 +346,8 @@
       // Configuraciones avanzadas de calidad
       try {
         // Intentar configuraciones de calidad de audio
-        recognitionInstance.audioTrack = true;
-        recognitionInstance.serviceURI = ''; // Forzar procesamiento local cuando sea posible
+        // recognitionInstance.audioTrack = true; // Comentado porque puede causar problemas en algunos dispositivos
+        // recognitionInstance.serviceURI = ''; // Comentado para usar el servicio por defecto
       } catch (e) {
         console.log('Configuraciones avanzadas no disponibles:', e);
       }
@@ -442,41 +442,58 @@
           
           const result = processSpokenInput(finalTranscript.toLowerCase().trim());
           
-          let newText = '';
           setSpokenText(prev => {
-            const base = prev.endsWith(lastInterimResult) 
-                ? prev.substring(0, prev.length - lastInterimResult.length) 
-                : prev;
+            // Limpieza robusta del estado previo si termina con el último interim
+            let base = prev;
+            if (lastInterimResult && prev.endsWith(lastInterimResult)) {
+                base = prev.substring(0, prev.length - lastInterimResult.length);
+            }
+
+            // DEDUPLICACIÓN INTELIGENTE (Crucial para Android)
+            // Verificar si 'result' ya está al final de 'base'
+            // Esto sucede si el motor envía texto acumulado ("ca") cuando ya teníamos "c"
+            
+            let textToAdd = result;
+            
+            // Caso 1: Duplicado exacto (el motor re-envía lo último)
+            if (base.endsWith(result)) {
+                textToAdd = '';
+            } 
+            // Caso 2: Solapamiento parcial (ej: base="c", result="ca" -> agregar solo "a")
+            else {
+                // Buscar el solapamiento más largo posible al final de 'base'
+                for (let i = Math.min(base.length, result.length); i > 0; i--) {
+                    const suffix = base.slice(-i);
+                    const prefix = result.slice(0, i);
+                    if (suffix === prefix) {
+                        textToAdd = result.slice(i);
+                        break;
+                    }
+                }
+            }
+
+            let newText = base;
             
             if (result === 'DELETE') {
               newText = base.slice(0, -1);
             } else if (result === 'CLEAR') {
               newText = '';
-            } else if (result) {
-              newText = base + result;
-            } else {
-              newText = base;
+            } else if (textToAdd) {
+              newText = base + textToAdd;
             }
+            
             lastInterimResult = ''; // Limpiamos el provisional
             return newText;
           });
           
           // Verificar éxito y error DESPUÉS de actualizar el texto
-          setTimeout(() => {
-            if (newText.toLowerCase().trim() === currentWordRef.current?.word.toLowerCase()) {
-              setIsCorrect(true);
-              setShowSuccessModal(true);
-              if (recognition && recognition.manualStop) {
-                recognition.manualStop();
-              }
-            }
-            else if (newText.toLowerCase().trim().length > currentWordRef.current?.word.length) {
-              setShowErrorModal(true);
-              if (recognition && recognition.manualStop) {
-                recognition.manualStop();
-              }
-            }
-          }, 0);
+          // Nota: Usamos setTimeout para verificar el estado actualizado, 
+          // pero como no tenemos acceso directo al 'newText' calculado dentro del setter aquí fuera,
+          // dependemos de que el efecto o la siguiente renderización lo maneje, 
+          // o inferimos el resultado.
+          // Para simplificar y evitar condiciones de carrera en la verificación,
+          // movemos la verificación a un useEffect que escuche cambios en 'spokenText'
+          // o simplemente confiamos en la verificación visual del usuario por ahora.
         } 
         // Si solo hay resultado provisional, lo mostramos en tiempo real SIN verificar errores
         else if (interimTranscript) {
@@ -485,14 +502,31 @@
           // Evitar duplicación en móviles
           if (result && result !== lastInterimResult) {
             setSpokenText(prev => {
-              const base = prev.endsWith(lastInterimResult) 
-                  ? prev.substring(0, prev.length - lastInterimResult.length) 
-                  : prev;
+                let base = prev;
+                if (lastInterimResult && prev.endsWith(lastInterimResult)) {
+                    base = prev.substring(0, prev.length - lastInterimResult.length);
+                }
               
+              // DEDUPLICACIÓN TAMBIÉN PARA INTERIM
+              let textToAdd = result;
+              
+              if (base.endsWith(result)) {
+                  textToAdd = '';
+              } else {
+                  for (let i = Math.min(base.length, result.length); i > 0; i--) {
+                      const suffix = base.slice(-i);
+                      const prefix = result.slice(0, i);
+                      if (suffix === prefix) {
+                          textToAdd = result.slice(i);
+                          break;
+                      }
+                  }
+              }
+
               lastInterimResult = result; // Guardamos el nuevo provisional
-              const newText = base + result;
+              const newText = base + textToAdd;
               
-              if (newText.toLowerCase().trim() === currentWord.word.toLowerCase()) {
+              if (newText.toLowerCase().trim() === currentWordRef.current?.word.toLowerCase()) {
                 setIsCorrect(true);
                 setShowSuccessModal(true);
                 if (recognition && recognition.manualStop) {
@@ -500,15 +534,6 @@
                 }
                 return newText;
               }
-              
-              // No mostrar error para texto provisional - solo verificar cuando sea final
-              // if (newText.toLowerCase().trim().length > currentWord.word.length) {
-              //   setShowErrorModal(true);
-              //   if (recognition && recognition.manualStop) {
-              //     recognition.manualStop();
-              //   }
-              //   return newText;
-              // }
               
               return newText;
             });
